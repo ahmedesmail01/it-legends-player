@@ -5,7 +5,7 @@ type Props = {
 };
 
 const CourseTitle = ({ title }: Props) => {
-  return <h1 className="text-3xl font-bold my-2">{title}</h1>;
+  return <h1 className="text-3xl font-bold mt-2">{title}</h1>;
 };
 
 export default CourseTitle;

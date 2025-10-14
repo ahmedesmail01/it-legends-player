@@ -25,6 +25,10 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 } */
 
+@theme {
+  --color-baby-blue: #f5f9fa; /* custom baby blue */
+}
+
 @layer base {
   * {
     margin: 0;
