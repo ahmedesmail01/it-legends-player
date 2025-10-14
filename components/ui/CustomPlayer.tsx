@@ -16,7 +16,6 @@ type Props = {
   src: string;
   poster?: string;
   autoPlay?: boolean;
-  /** Extra wrapper classes (e.g., to control stickiness outside) */
   className?: string;
 };
 
@@ -37,6 +36,12 @@ export default function CustomPlayer({
   const [muted, setMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  // ⬇️ NEW: auto-hide
+  const [showControls, setShowControls] = useState(true);
+  const idleTimer = useRef<number | null>(null);
+  const isScrubbing = useRef(false);
+  const IDLE_MS = 2200;
+
   const fmt = (t: number) => {
     const m = Math.floor(t / 60);
     const s = Math.floor(t % 60)
@@ -45,14 +50,40 @@ export default function CustomPlayer({
     return `${m}:${s}`;
   };
 
-  // sync duration/time/play state
+  // helpers
+  const clearIdle = () => {
+    if (idleTimer.current) {
+      window.clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
+  };
+  const startIdle = () => {
+    clearIdle();
+    // Only hide when playing and not scrubbing
+    idleTimer.current = window.setTimeout(() => {
+      if (playing && !isScrubbing.current) setShowControls(false);
+    }, IDLE_MS) as unknown as number;
+  };
+  const nudgeControls = () => {
+    setShowControls(true);
+    startIdle();
+  };
+
+  // wire basic video events
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const onLoaded = () => setDuration(v.duration || 0);
     const onTime = () => setCurrent(v.currentTime || 0);
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPlay = () => {
+      setPlaying(true);
+      nudgeControls(); // show briefly when playback starts
+    };
+    const onPause = () => {
+      setPlaying(false);
+      clearIdle();
+      setShowControls(true); // stay visible when paused
+    };
 
     v.addEventListener("loadedmetadata", onLoaded);
     v.addEventListener("timeupdate", onTime);
@@ -66,7 +97,7 @@ export default function CustomPlayer({
     };
   }, []);
 
-  // Track fullscreen (ESC, browser UI, iOS events)
+  // fullscreen tracking (incl. iOS)
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFsChange);
@@ -84,6 +115,42 @@ export default function CustomPlayer({
     };
   }, []);
 
+  // global interactions that should reveal controls
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+
+    const onMove = () => nudgeControls();
+    const onEnter = () => nudgeControls();
+    const onLeave = () => {
+      // if playing and not scrubbing, hide a bit after leaving
+      if (playing && !isScrubbing.current) startIdle();
+    };
+    const onTouch = () => nudgeControls();
+    const onKey = (e: KeyboardEvent) => {
+      // space/arrow keys commonly used
+      if (
+        [" ", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)
+      ) {
+        nudgeControls();
+      }
+    };
+
+    el.addEventListener("mousemove", onMove);
+    el.addEventListener("mouseenter", onEnter);
+    el.addEventListener("mouseleave", onLeave);
+    el.addEventListener("touchstart", onTouch, { passive: true });
+    window.addEventListener("keydown", onKey);
+
+    return () => {
+      el.removeEventListener("mousemove", onMove);
+      el.removeEventListener("mouseenter", onEnter);
+      el.removeEventListener("mouseleave", onLeave);
+      el.removeEventListener("touchstart", onTouch);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [playing]);
+
   // controls
   const togglePlay = () => {
     const v = videoRef.current;
@@ -95,8 +162,14 @@ export default function CustomPlayer({
     const v = videoRef.current;
     if (!v) return;
     const val = Number(e.target.value);
+    isScrubbing.current = true;
+    setShowControls(true);
     v.currentTime = val;
     setCurrent(val);
+  };
+  const onSeekEnd = () => {
+    isScrubbing.current = false;
+    if (playing) startIdle();
   };
 
   const onVolume = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -106,6 +179,7 @@ export default function CustomPlayer({
     v.volume = val;
     setVolume(val);
     setMuted(val === 0);
+    nudgeControls();
   };
 
   const toggleMute = () => {
@@ -113,58 +187,80 @@ export default function CustomPlayer({
     if (!v) return;
     v.muted = !v.muted;
     setMuted(v.muted);
+    nudgeControls();
   };
 
-  // Fullscreen toggle with state + iOS fallback
   const toggleFullscreen = async () => {
     const wrapper = wrapperRef.current;
     const v = videoRef.current as any;
     try {
       if (!isFullscreen) {
-        if (wrapper?.requestFullscreen) {
-          await wrapper.requestFullscreen();
-        } else if (v?.webkitEnterFullscreen) {
-          v.webkitEnterFullscreen();
-        }
+        if (wrapper?.requestFullscreen) await wrapper.requestFullscreen();
+        else if (v?.webkitEnterFullscreen) v.webkitEnterFullscreen();
         setIsFullscreen(true);
       } else {
-        if (document.fullscreenElement && document.exitFullscreen) {
+        if (document.fullscreenElement && document.exitFullscreen)
           await document.exitFullscreen();
-        } else if (v?.webkitExitFullscreen) {
-          v.webkitExitFullscreen?.();
-        }
+        else v?.webkitExitFullscreen?.();
         setIsFullscreen(false);
       }
     } catch {}
+    nudgeControls();
   };
 
   return (
     <div
       ref={wrapperRef}
       className={[
-        "relative mx-auto p-4",
+        "relative mx-auto w-full max-w-screen overflow-hidden",
         "aspect-video md:aspect-auto",
+        "md:p-4",
         wide ? "md:max-w-none md:w-full" : "md:max-w-[780px] md:w-[780px]",
         className,
       ].join(" ")}
     >
-      {/* Video (no native controls) */}
       <video
         ref={videoRef}
         src={src}
         poster={poster}
         autoPlay={autoPlay}
         className={[
-          "w-full h-full bg-black",
+          "block w-full h-full bg-black",
           wide ? "rounded-none" : "rounded-lg",
         ].join(" ")}
         playsInline
+        onClick={togglePlay} // tap = play/pause + reveal
+        onPlay={nudgeControls}
+        onPause={() => {
+          clearIdle();
+          setShowControls(true);
+        }}
       />
 
-      {/* Controls */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 px-4">
-        <div className="pointer-events-auto rounded-lg bg-black/60 text-white backdrop-blur-sm">
-          {/* Seek */}
+      {/* Controls (auto-hide) */}
+      <div
+        className={[
+          "absolute inset-x-0 bottom-0 px-3 pb-3 transition-all duration-200",
+          showControls
+            ? "opacity-100 translate-y-0"
+            : "opacity-0 translate-y-2",
+        ].join(" ")}
+      >
+        <div
+          className={[
+            "rounded-lg bg-black/60 text-white backdrop-blur-sm",
+            // disable interactions when hidden
+            showControls ? "pointer-events-auto" : "pointer-events-none",
+          ].join(" ")}
+          // keep visible while hovering the bar
+          onMouseEnter={() => {
+            clearIdle();
+            setShowControls(true);
+          }}
+          onMouseLeave={() => {
+            if (playing) startIdle();
+          }}
+        >
           <div className="px-3 pt-3">
             <input
               type="range"
@@ -173,11 +269,12 @@ export default function CustomPlayer({
               step={0.1}
               value={current}
               onChange={onSeek}
+              onMouseUp={onSeekEnd}
+              onTouchEnd={onSeekEnd}
               className="w-full accent-white"
             />
           </div>
 
-          {/* Row */}
           <div className="flex items-center gap-2 px-3 py-2">
             <button
               onClick={togglePlay}
@@ -216,9 +313,11 @@ export default function CustomPlayer({
             />
 
             <div className="ml-auto flex items-center gap-2">
-              {/* Wide (desktop) */}
               <button
-                onClick={() => setWide((v) => !v)}
+                onClick={() => {
+                  setWide((v) => !v);
+                  nudgeControls();
+                }}
                 className="hidden md:inline-block rounded-md px-3 py-1 text-sm hover:bg-white/10"
                 title="Wide"
               >
@@ -229,7 +328,6 @@ export default function CustomPlayer({
                 )}
               </button>
 
-              {/* Fullscreen */}
               <button
                 onClick={toggleFullscreen}
                 className="rounded-md px-3 py-1 text-sm hover:bg-white/10"
